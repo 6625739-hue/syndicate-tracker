@@ -240,11 +240,7 @@ const ACCOUNTS = [
   "5462 - Gruber","5464 - Lichtman","5466 - Oberlander"
 ];
 
-const SHARE_RATIOS = {
-  "5456 - Rosenfeld":0.1726,"5458 - Werzberger":0.1716,
-  "5460 - Lazar":0.1717,"5462 - Gruber":0.1714,
-  "5464 - Lichtman":0.1714,"5466 - Oberlander":0.1413
-};
+// Share ratios removed — equal split used instead
 
 const SEED_DATA = [
 ["2023-06-01","Claud",-3000,"syndicate","BMO"],
@@ -575,9 +571,13 @@ function calcAccountStats() {
     const acct = ACCOUNTS.find(a => t.by === a);
     if (acct) stats[acct].paid += t.amount;
   });
-  const syndicateOut = txns.filter(t => t.by === 'syndicate' && t.amount < 0).reduce((s,t) => s + t.amount, 0);
+  const totalExpenses = txns
+    .filter(t => t.by === 'syndicate' && t.amount < 0)
+    .reduce((s,t) => s + Math.abs(t.amount), 0);
+  const equalShare = totalExpenses / ACCOUNTS.length;
   ACCOUNTS.forEach(a => {
-    stats[a].balance = stats[a].paid - Math.abs(syndicateOut) * (SHARE_RATIOS[a] || 0.1667);
+    // Balance = equal share - paid (matches sheet: positive = credit/overpaid, negative = still owes)
+    stats[a].balance = equalShare - stats[a].paid;
   });
   return stats;
 }
@@ -666,12 +666,14 @@ function renderOverview() {
     ownerGrid.innerHTML = ACCOUNTS.map(a => {
       const [num, name] = a.split(' - ');
       const bal = stats[a].balance;
-      const isPos = bal >= 0;
-      return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;border-top:3px solid ${isPos?'#1a7a4a':'#c0392b'}">
+      const owes = bal > 0;
+      const color = owes ? '#c0392b' : '#1a7a4a';
+      const label = owes ? '▼ owes' : bal < 0 ? '▲ credit' : '✓ settled';
+      return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;border-top:3px solid ${color}">
         <div style="font-family:var(--mono);font-size:11px;color:var(--text3);margin-bottom:4px">${num}</div>
         <div style="font-size:16px;font-weight:600;margin-bottom:10px">${name}</div>
-        <div style="font-family:var(--mono);font-size:24px;font-weight:500;color:${isPos?'#1a7a4a':'#c0392b'}">${fmt(bal)}</div>
-        <div style="font-size:11px;color:var(--text3);margin-top:4px">${isPos?'▲ credit':'▼ owes'}</div>
+        <div style="font-family:var(--mono);font-size:24px;font-weight:500;color:${color}">${fmt(bal)}</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:4px">${label}</div>
       </div>`;
     }).join('');
   }
@@ -686,7 +688,7 @@ function renderAccounts() {
       return `<div class="acct-card">
         <div class="acct-num">${num}</div><div class="acct-name">${name}</div>
         <div class="acct-row"><span>Paid in</span><span class="mono pos">${fmt(s.paid)}</span></div>
-        <div class="acct-row"><span>Balance</span><span class="mono ${s.balance>=0?'pos':'neg'}">${fmt(s.balance)}</span></div>
+        <div class="acct-row"><span>Balance</span><span class="mono ${s.balance>0?'neg':s.balance<0?'pos':''}">${fmt(s.balance)}</span></div>
       </div>`;
     }).join('')}</div>
     <div class="chart-section">
@@ -698,7 +700,7 @@ function renderAccounts() {
   if (charts.bal) charts.bal.destroy();
   charts.bal = new Chart(document.getElementById('balChart'), {
     type:'bar',
-    data:{labels:ACCOUNTS.map(a=>a.split(' - ')[1]),datasets:[{data:balData,backgroundColor:balData.map(v=>v>=0?'#1a7a4a':'#c0392b'),borderRadius:3}]},
+    data:{labels:ACCOUNTS.map(a=>a.split(' - ')[1]),datasets:[{data:balData,backgroundColor:balData.map(v=>v>0?'#c0392b':'#1a7a4a'),borderRadius:3}]},
     options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
       scales:{x:{ticks:{font:{size:12}},grid:{display:false}},y:{ticks:{callback:v=>(v<0?'-':'')+'$'+Math.abs(v).toFixed(0),font:{size:10}}}}}
   });
@@ -729,10 +731,11 @@ function renderLedgerShell() {
       <table class="ledger">
         <thead><tr>
           <th style="width:96px">Date</th>
-          <th style="width:28%">Payee</th>
+          <th style="width:26%">Payee</th>
           <th style="width:100px;text-align:right">Amount</th>
-          <th style="width:22%">By</th>
-          <th style="width:60px">Acct</th>
+          <th style="width:20%">By</th>
+          <th style="width:55px">Acct</th>
+          <th style="width:36px"></th>
         </tr></thead>
         <tbody id="ledger-body"></tbody>
       </table>
@@ -755,12 +758,18 @@ function renderLedger() {
   tbody.innerHTML = filtered.map(t => {
     const isSyn = t.by === 'syndicate';
     const byName = isSyn ? 'syndicate' : (t.by.split(' - ')[1] || t.by);
-    return `<tr>
+    const origIdx = txns.length - 1 - txns.slice().reverse().findIndex((x,ri) => {
+      const fi = filtered.length - 1 - filtered.slice().reverse().indexOf(t);
+      return false;
+    });
+    const realIdx = txns.indexOf(t);
+    return `<tr id="txrow-${realIdx}">
       <td style="font-family:var(--mono);font-size:12px;color:var(--text2)">${t.date}</td>
       <td title="${t.payee}">${t.payee}</td>
       <td style="text-align:right;font-family:var(--mono);font-size:12px" class="${t.amount>=0?'pos':'neg'}">${fmt(t.amount)}</td>
       <td><span class="badge ${isSyn?'badge-syndicate':'badge-acct'}">${byName}</span></td>
       <td style="font-family:var(--mono);font-size:11px;color:var(--text3)">${t.acct}</td>
+      <td><button onclick="confirmDelete(${realIdx})" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:15px;padding:2px 4px;border-radius:3px;transition:color .15s" onmouseover="this.style.color='#c0392b'" onmouseout="this.style.color='var(--text3)'">×</button></td>
     </tr>`;
   }).join('');
   const countEl = document.getElementById('ledger-count');
@@ -833,6 +842,34 @@ function exportCSV() {
   a.href = URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
   a.download = 'syndicate-transactions.csv';
   a.click();
+}
+
+// ─── DELETE TRANSACTION ──────────────────────────────────────────────────────
+function confirmDelete(idx) {
+  const t = txns[idx];
+  if (!confirm(`Delete this transaction?
+
+${t.date}  ${t.payee}  ${fmt(t.amount)}`)) return;
+  deleteTransaction(idx);
+}
+
+async function deleteTransaction(idx) {
+  const t = txns[idx];
+  try {
+    const result = await apiPost({action: 'delete', txn: t, idx: idx});
+    if (result.status === 'ok') {
+      txns.splice(idx, 1);
+      renderLedger();
+      renderOverview();
+      renderAccounts();
+      setSyncStatus('live', 'Live · ' + txns.length + ' transactions');
+      showToast('Transaction deleted ✓');
+    } else {
+      throw new Error(result.message);
+    }
+  } catch(e) {
+    showToast('Delete failed: ' + e.message, true);
+  }
 }
 
 // ─── START ───────────────────────────────────────────────────────────────────
