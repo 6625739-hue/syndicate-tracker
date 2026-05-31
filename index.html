@@ -194,7 +194,8 @@
     </div>
     <div class="form-row">
       <label>Payee</label>
-      <input type="text" id="f-payee" placeholder="e.g. VIP Plumbing">
+      <input type="text" id="f-payee" placeholder="e.g. VIP Plumbing" list="payee-suggestions" autocomplete="off">
+      <datalist id="payee-suggestions"></datalist>
     </div>
     <div class="form-grid">
       <div class="form-row">
@@ -534,7 +535,7 @@ async function init() {
         await apiPost({action:'seed', txns: seedTxns});
         txns = seedTxns;
       } else {
-        txns = data.txns;
+        txns = data.txns.map(t => ({...t, date: String(t.date).slice(0,10)}));
       }
       setSyncStatus('live', 'Live · ' + txns.length + ' transactions');
       buildUI();
@@ -590,6 +591,10 @@ function renderOverview() {
   const net = bmoBalance + cashBalance;
 
   document.getElementById('overview-content').innerHTML = `
+    <div style="margin-bottom:28px">
+      <div class="section-label">Owner balances</div>
+      <div id="owner-balance-grid"></div>
+    </div>
     <div class="metrics">
       <div class="metric"><label>Total contributions</label><div class="val pos">${fmt(totalContrib)}</div></div>
       <div class="metric"><label>Total expenses</label><div class="val neg">${fmt(-totalExpense)}</div></div>
@@ -652,6 +657,24 @@ function renderOverview() {
     options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
       scales:{x:{ticks:{callback:v=>'$'+(v/1000).toFixed(0)+'k',font:{size:10}}},y:{ticks:{font:{size:11}},grid:{display:false}}}}
   });
+
+  // Render owner balance grid
+  const ownerGrid = document.getElementById('owner-balance-grid');
+  if (ownerGrid) {
+    const stats = calcAccountStats();
+    ownerGrid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px';
+    ownerGrid.innerHTML = ACCOUNTS.map(a => {
+      const [num, name] = a.split(' - ');
+      const bal = stats[a].balance;
+      const isPos = bal >= 0;
+      return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;border-top:3px solid ${isPos?'#1a7a4a':'#c0392b'}">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--text3);margin-bottom:4px">${num}</div>
+        <div style="font-size:16px;font-weight:600;margin-bottom:10px">${name}</div>
+        <div style="font-family:var(--mono);font-size:24px;font-weight:500;color:${isPos?'#1a7a4a':'#c0392b'}">${fmt(bal)}</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:4px">${isPos?'▲ credit':'▼ owes'}</div>
+      </div>`;
+    }).join('');
+  }
 }
 
 // ─── ACCOUNTS ────────────────────────────────────────────────────────────────
@@ -753,6 +776,10 @@ function openModal() {
   document.getElementById('f-by').value = 'syndicate';
   document.getElementById('submit-btn').disabled = false;
   document.getElementById('submit-btn').textContent = 'Add transaction';
+  // Populate payee suggestions from existing transactions
+  const names = [...new Set(txns.map(t => t.payee))].sort();
+  const dl = document.getElementById('payee-suggestions');
+  dl.innerHTML = names.map(n => `<option value="${n}">`).join('');
   document.getElementById('modal-overlay').classList.add('open');
 }
 
