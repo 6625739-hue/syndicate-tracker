@@ -506,25 +506,18 @@ function showToast(msg, isError) {
 }
 
 // ─── API ─────────────────────────────────────────────────────────────────────
-function jsonp(url) {
-  return new Promise((resolve, reject) => {
-    const cb = 'cb_' + Math.random().toString(36).slice(2);
-    const script = document.createElement('script');
-    window[cb] = (data) => { delete window[cb]; document.head.removeChild(script); resolve(data); };
-    script.onerror = () => { delete window[cb]; document.head.removeChild(script); reject(new Error('Script load failed')); };
-    script.src = url + (url.includes('?') ? '&' : '?') + 'callback=' + cb;
-    document.head.appendChild(script);
-  });
-}
-
 async function apiGet() {
-  return await jsonp(API_URL + '?action=get');
+  const res = await fetch(API_URL + '?action=get');
+  return await res.json();
 }
 
 async function apiPost(body) {
-  // Apps Script doesn't support JSONP POST — encode as GET param
-  const encoded = encodeURIComponent(JSON.stringify(body));
-  return await jsonp(API_URL + '?action=post&data=' + encoded);
+  const res = await fetch(API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(body)
+  });
+  return await res.json();
 }
 
 // ─── INIT ────────────────────────────────────────────────────────────────────
