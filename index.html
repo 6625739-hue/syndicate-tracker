@@ -152,6 +152,7 @@
       <div class="sync-dot loading" id="sync-dot"></div>
       <span id="sync-label">Connecting…</span>
     </div>
+    <button id="lock-btn" onclick="lockApp()" class="export-btn" style="display:none;padding:5px 12px">Lock</button>
   </div>
 </header>
 
@@ -256,6 +257,25 @@
       <button class="btn btn-secondary" onclick="downloadStatementCSV()">Download CSV</button>
       <button class="btn btn-secondary" onclick="printStatement()">Print</button>
       <button class="btn btn-primary" onclick="closeStmt()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- LOGIN GATE -->
+<div class="modal-overlay" id="login-overlay">
+  <div class="modal" style="max-width:400px">
+    <h2>Enter passphrase</h2>
+    <div class="form-row">
+      <label>Access passphrase</label>
+      <input type="password" id="login-input" placeholder="••••••••" autocomplete="current-password"
+             onkeydown="if(event.key==='Enter')submitLogin()">
+    </div>
+    <div id="login-msg" style="font-size:12px;color:var(--red);font-family:var(--mono);min-height:16px;margin-bottom:6px"></div>
+    <div class="modal-actions">
+      <button class="btn btn-primary" onclick="submitLogin()">Unlock</button>
+    </div>
+    <div style="font-size:11px;color:var(--text3);margin-top:10px;line-height:1.5">
+      The passphrase is stored only in this browser and sent to your own Google Sheet — it is never saved in the app's code.
     </div>
   </div>
 </div>
@@ -568,9 +588,38 @@ function showToast(msg, isError) {
   setTimeout(() => t.classList.remove('show'), 3000);
 }
 
+// ─── AUTH ────────────────────────────────────────────────────────────────────
+// The access passphrase is entered by the user and kept ONLY in this browser
+// (localStorage) — it is deliberately never hardcoded here, because this file
+// is public. Every request carries it; the Apps Script backend verifies it.
+const AUTH_KEY = 'synAuth';
+let AUTH = '';
+try { AUTH = localStorage.getItem(AUTH_KEY) || ''; } catch {}
+
+function showLogin(msg) {
+  document.getElementById('login-msg').textContent = msg || '';
+  document.getElementById('login-input').value = '';
+  document.getElementById('login-overlay').classList.add('open');
+  document.getElementById('lock-btn').style.display = 'none';
+  setTimeout(() => document.getElementById('login-input').focus(), 50);
+}
+function submitLogin() {
+  const v = document.getElementById('login-input').value.trim();
+  if (!v) return;
+  AUTH = v;
+  try { localStorage.setItem(AUTH_KEY, v); } catch {}
+  document.getElementById('login-overlay').classList.remove('open');
+  init();
+}
+function lockApp() {
+  AUTH = '';
+  try { localStorage.removeItem(AUTH_KEY); } catch {}
+  location.reload();
+}
+
 // ─── API ─────────────────────────────────────────────────────────────────────
 async function apiGet() {
-  const res = await fetch(API_URL + '?action=get');
+  const res = await fetch(API_URL + '?action=get&token=' + encodeURIComponent(AUTH));
   return await res.json();
 }
 
@@ -578,7 +627,7 @@ async function apiPost(body) {
   const res = await fetch(API_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify(body)
+    body: JSON.stringify({ ...body, token: AUTH })
   });
   return await res.json();
 }
@@ -587,7 +636,7 @@ async function apiPost(body) {
 // Apps Script backend; if the backend doesn't support them yet, they fail
 // gracefully and the app falls back to the localStorage copy.
 async function apiGetConfig() {
-  const res = await fetch(API_URL + '?action=getConfig');
+  const res = await fetch(API_URL + '?action=getConfig&token=' + encodeURIComponent(AUTH));
   return await res.json();
 }
 async function apiSetConfig(cfg) {
@@ -611,10 +660,18 @@ async function hydrateFeeCfg() {
 
 // ─── INIT ────────────────────────────────────────────────────────────────────
 async function init() {
+  if (!AUTH) { showLogin('Enter the access passphrase to continue.'); return; }
   setSyncStatus('loading', 'Connecting…');
   try {
     // Try to load from sheet
     const data = await apiGet();
+    if (data.status === 'unauthorized') {
+      AUTH = '';
+      try { localStorage.removeItem(AUTH_KEY); } catch {}
+      setSyncStatus('error', 'Locked');
+      showLogin('Incorrect passphrase — please try again.');
+      return;
+    }
     if (data.status === 'ok') {
       if (data.txns.length === 0) {
         // Sheet is empty — seed it with all historical data
@@ -626,6 +683,7 @@ async function init() {
         txns = data.txns.map(t => ({...t, date: String(t.date).slice(0,10)}));
       }
       setSyncStatus('live', 'Live · ' + txns.length + ' transactions');
+      document.getElementById('lock-btn').style.display = '';
       buildUI();
       hydrateFeeCfg();   // pull saved fee settings from the sheet (best-effort)
     } else {
@@ -634,8 +692,9 @@ async function init() {
   } catch(e) {
     setSyncStatus('error', 'Offline — check script URL');
     showToast('Could not connect to Google Sheets. Check the script URL.', true);
-    // Fallback to seed data so app still works
+    // Fallback to seed data so app still works offline
     txns = SEED_DATA.map(r => ({date:r[0],payee:r[1],amount:r[2],by:r[3],acct:r[4]}));
+    document.getElementById('lock-btn').style.display = '';
     buildUI();
   }
 }
