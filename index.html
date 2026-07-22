@@ -151,6 +151,7 @@
   <nav>
     <button class="active" onclick="showView('overview',this)">Overview</button>
     <button onclick="showView('accounts',this)">Accounts</button>
+    <button onclick="showView('budget',this)">Fees &amp; Fund</button>
     <button onclick="showView('ledger',this)">Ledger</button>
   </nav>
 
@@ -162,6 +163,12 @@
 
   <div id="view-accounts" class="view">
     <div id="accounts-content">
+      <div class="loading-screen"><div class="spinner"></div>Loading data…</div>
+    </div>
+  </div>
+
+  <div id="view-budget" class="view">
+    <div id="budget-content">
       <div class="loading-screen"><div class="spinner"></div>Loading data…</div>
     </div>
   </div>
@@ -239,6 +246,26 @@ const ACCOUNTS = [
 ];
 
 // Share ratios removed — equal split used instead
+
+// ─── FEE / FUND CONFIG ───────────────────────────────────────────────────────
+// Annual-dues model (applies from 2026). Every value here is editable in the
+// "Fees & Fund" tab and persisted to the browser via localStorage.
+//   fee         = annual fee owed per owner
+//   insMonthly  = budgeted insurance per owner per month (×12 = yearly insurance)
+//   other       = budgeted "other expenses" per owner per year
+//   contingency = budgeted contingency-fund contribution per owner per year
+// "Insurance first, split the rest": insurance is funded first, and whatever is
+// left of the fee (fee − insurance) is divided between other + contingency.
+const FEE_DEFAULTS = { fee: 2500, insMonthly: 200, other: 50, contingency: 50, startYear: 2026 };
+const FEE_CFG_KEY = 'synFeeCfg';
+
+function loadFeeCfg() {
+  try { return { ...FEE_DEFAULTS, ...JSON.parse(localStorage.getItem(FEE_CFG_KEY) || '{}') }; }
+  catch { return { ...FEE_DEFAULTS }; }
+}
+function saveFeeCfg(cfg) {
+  try { localStorage.setItem(FEE_CFG_KEY, JSON.stringify(cfg)); } catch {}
+}
 
 const SEED_DATA = [
 ["2023-06-01","Claud",-3000,"syndicate","BMO"],
@@ -552,6 +579,7 @@ async function init() {
 function buildUI() {
   renderOverview();
   renderAccounts();
+  renderBudget();
   renderLedgerShell();
   renderLedger();
 }
@@ -707,6 +735,158 @@ function renderAccounts() {
   });
 }
 
+// ─── FEES & FUND ─────────────────────────────────────────────────────────────
+let feeYear = null;
+
+// Compute the annual-dues / fund picture for one calendar year.
+function feeStats(year, cfg) {
+  const yStr = String(year);
+  const insYr = cfg.insMonthly * 12;                 // budgeted insurance / owner / year
+  const remainder = cfg.fee - insYr;                 // left after insurance is funded
+  const isInsurance = p => /insurance/i.test(p || '');
+
+  // What each owner has contributed this calendar year (net).
+  const paid = {};
+  ACCOUNTS.forEach(a => paid[a] = 0);
+  txns.forEach(t => {
+    if (String(t.date).slice(0, 4) === yStr && ACCOUNTS.includes(t.by)) paid[t.by] += t.amount;
+  });
+
+  const rows = ACCOUNTS.map(a => {
+    const p = paid[a];
+    return { acct: a, name: a.split(' - ')[1] || a, num: a.split(' - ')[0],
+             fee: cfg.fee, paid: p, balance: cfg.fee - p };   // balance > 0 ⇒ still owes
+  });
+
+  // Actual syndicate spending this year, split insurance vs other.
+  let insSpent = 0, otherSpent = 0;
+  txns.forEach(t => {
+    if (String(t.date).slice(0, 4) === yStr && t.by === 'syndicate' && t.amount < 0) {
+      if (isInsurance(t.payee)) insSpent += Math.abs(t.amount);
+      else otherSpent += Math.abs(t.amount);
+    }
+  });
+
+  const n = ACCOUNTS.length;
+  const collected = rows.reduce((s, r) => s + Math.max(r.paid, 0), 0);
+  const feeDue = cfg.fee * n;
+
+  // Real money on hand across all time (the actual pooled fund).
+  const fundOnHand = txns.reduce((s, t) => s + t.amount, 0);
+
+  return {
+    rows, insYr, remainder,
+    budget: { insurance: insYr * n, other: cfg.other * n, contingency: cfg.contingency * n, fee: feeDue },
+    collected, feeDue, outstanding: feeDue - collected,
+    insSpent, otherSpent,
+    insSurplus: insYr * n - insSpent,                // budgeted insurance minus what was actually paid
+    netToReserve: collected - (insSpent + otherSpent),
+    fundOnHand
+  };
+}
+
+function renderBudget() {
+  const cfg = loadFeeCfg();
+  const years = [...new Set(txns.map(t => String(t.date).slice(0, 4)))].filter(Boolean).sort();
+  if (!years.includes(String(cfg.startYear))) years.push(String(cfg.startYear));
+  years.sort();
+  if (feeYear === null) feeYear = String(cfg.startYear);
+  if (!years.includes(feeYear)) feeYear = years[years.length - 1];
+
+  const s = feeStats(feeYear, cfg);
+  const remainderWarn = s.remainder < 0;
+  const splitOver = (cfg.other + cfg.contingency) - s.remainder; // >0 ⇒ buckets exceed what's left
+
+  const bar = (paid, fee) => {
+    const pct = fee > 0 ? Math.max(0, Math.min(100, (paid / fee) * 100)) : 0;
+    const done = paid >= fee;
+    const col = done ? 'var(--green)' : '#c98a1a';
+    return `<div style="height:6px;background:var(--surface2);border-radius:3px;overflow:hidden;margin-top:8px">
+      <div style="height:100%;width:${pct.toFixed(1)}%;background:${col}"></div></div>`;
+  };
+
+  document.getElementById('budget-content').innerHTML = `
+    <div class="section-label">Fee settings · ${esc(feeYear)}</div>
+    <div class="chart-box" style="margin-bottom:28px">
+      <div class="filters" style="margin-bottom:16px">
+        <div class="form-row" style="margin:0">
+          <label>Year</label>
+          <select id="fee-year" onchange="onFeeYear(this.value)">
+            ${years.map(y => `<option value="${esc(y)}" ${y === feeYear ? 'selected' : ''}>${esc(y)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">
+        <div class="form-row" style="margin:0"><label>Annual fee / owner ($)</label>
+          <input type="number" id="fee-fee" value="${cfg.fee}" step="50" onchange="saveFeeInputs()"></div>
+        <div class="form-row" style="margin:0"><label>Insurance / owner / month ($)</label>
+          <input type="number" id="fee-ins" value="${cfg.insMonthly}" step="10" onchange="saveFeeInputs()"></div>
+        <div class="form-row" style="margin:0"><label>Other exp. / owner / yr ($)</label>
+          <input type="number" id="fee-other" value="${cfg.other}" step="10" onchange="saveFeeInputs()"></div>
+        <div class="form-row" style="margin:0"><label>Contingency / owner / yr ($)</label>
+          <input type="number" id="fee-cont" value="${cfg.contingency}" step="10" onchange="saveFeeInputs()"></div>
+      </div>
+      <div style="font-size:12px;color:var(--text2);margin-top:12px;font-family:var(--mono)">
+        Insurance first: ${fmt(s.insYr)}/owner/yr → leaves <strong>${fmt(s.remainder)}</strong> of the ${fmt(cfg.fee)} fee for other + contingency.
+        ${remainderWarn ? `<span style="color:var(--red)"> ⚠ Insurance alone exceeds the fee.</span>` : ''}
+        ${!remainderWarn && splitOver > 0.005 ? `<span style="color:var(--red)"> ⚠ Other + contingency (${fmt(cfg.other + cfg.contingency)}) exceed the ${fmt(s.remainder)} left over.</span>` : ''}
+      </div>
+    </div>
+
+    <div class="section-label">Fee status · ${esc(feeYear)}</div>
+    <div class="account-grid" style="margin-bottom:16px">
+      ${s.rows.map(r => {
+        const owes = r.balance > 0.005, credit = r.balance < -0.005;
+        const col = owes ? 'var(--red)' : 'var(--green)';
+        const tag = owes ? '▼ owes' : credit ? '▲ overpaid' : '✓ paid up';
+        return `<div class="acct-card" style="border-top:3px solid ${col}">
+          <div class="acct-num">${esc(r.num)}</div>
+          <div class="acct-name">${esc(r.name)}</div>
+          <div class="acct-row" style="border-top:none;padding-top:0"><span>Paid ${esc(feeYear)}</span><span class="mono">${fmt(r.paid)}</span></div>
+          <div class="acct-row"><span>Fee</span><span class="mono">${fmt(r.fee)}</span></div>
+          <div class="acct-row"><span>${owes ? 'Still owes' : 'Balance'}</span><span class="mono" style="color:${col}">${fmt(Math.abs(r.balance))}</span></div>
+          ${bar(r.paid, r.fee)}
+          <div style="font-size:11px;color:var(--text3);margin-top:4px">${tag}</div>
+        </div>`;
+      }).join('')}
+    </div>
+    <div class="metrics" style="margin-bottom:28px">
+      <div class="metric"><label>Fees due (${esc(feeYear)})</label><div class="val">${fmt(s.feeDue)}</div></div>
+      <div class="metric"><label>Collected</label><div class="val pos">${fmt(s.collected)}</div></div>
+      <div class="metric"><label>Outstanding</label><div class="val ${s.outstanding>0?'neg':'pos'}">${fmt(s.outstanding)}</div></div>
+    </div>
+
+    <div class="section-label">Where the fee goes · budgeted for all ${ACCOUNTS.length} owners</div>
+    <div class="metrics" style="margin-bottom:28px">
+      <div class="metric"><label>Insurance budget</label><div class="val">${fmt(s.budget.insurance)}</div></div>
+      <div class="metric"><label>Other expenses budget</label><div class="val">${fmt(s.budget.other)}</div></div>
+      <div class="metric"><label>Contingency budget</label><div class="val">${fmt(s.budget.contingency)}</div></div>
+      <div class="metric"><label>Total fees</label><div class="val">${fmt(s.budget.fee)}</div></div>
+    </div>
+
+    <div class="section-label">Actual spending &amp; fund · ${esc(feeYear)}</div>
+    <div class="metrics">
+      <div class="metric"><label>Insurance spent</label><div class="val ${s.insSpent>s.budget.insurance?'neg':''}">${fmt(-s.insSpent)}</div><label style="margin-top:6px">of ${fmt(s.budget.insurance)} budget</label></div>
+      <div class="metric"><label>Other spent</label><div class="val ${s.otherSpent>s.budget.other?'neg':''}">${fmt(-s.otherSpent)}</div><label style="margin-top:6px">of ${fmt(s.budget.other)} budget</label></div>
+      <div class="metric"><label>Insurance surplus</label><div class="val ${s.insSurplus>=0?'pos':'neg'}">${fmt(s.insSurplus)}</div><label style="margin-top:6px">budget − actual</label></div>
+      <div class="metric"><label>Net to reserve (${esc(feeYear)})</label><div class="val ${s.netToReserve>=0?'pos':'neg'}">${fmt(s.netToReserve)}</div><label style="margin-top:6px">collected − spent</label></div>
+      <div class="metric"><label>Fund on hand (all-time)</label><div class="val ${s.fundOnHand>=0?'pos':'neg'}">${fmt(s.fundOnHand)}</div><label style="margin-top:6px">BMO + Cash</label></div>
+    </div>`;
+}
+
+function onFeeYear(y) { feeYear = String(y); renderBudget(); }
+
+function saveFeeInputs() {
+  const num = (id, def) => { const v = parseFloat(document.getElementById(id).value); return isNaN(v) ? def : v; };
+  const cfg = loadFeeCfg();
+  cfg.fee = num('fee-fee', cfg.fee);
+  cfg.insMonthly = num('fee-ins', cfg.insMonthly);
+  cfg.other = num('fee-other', cfg.other);
+  cfg.contingency = num('fee-cont', cfg.contingency);
+  saveFeeCfg(cfg);
+  renderBudget();
+}
+
 // ─── LEDGER SHELL ────────────────────────────────────────────────────────────
 function renderLedgerShell() {
   document.getElementById('ledger-content').innerHTML = `
@@ -819,6 +999,7 @@ async function addTransaction() {
       renderLedger();
       renderOverview();
       renderAccounts();
+      renderBudget();
       setSyncStatus('live', 'Live · ' + txns.length + ' transactions');
       showToast('Transaction saved to Google Sheets ✓');
     } else {
@@ -859,6 +1040,7 @@ async function deleteTransaction(idx) {
       renderLedger();
       renderOverview();
       renderAccounts();
+      renderBudget();
       setSyncStatus('live', 'Live · ' + txns.length + ' transactions');
       showToast('Transaction deleted ✓');
     } else {
